@@ -1,37 +1,57 @@
 package common
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"github.com/songquanpeng/one-api/common/config"
 	"net/smtp"
 	"strings"
+	"time"
 )
 
 func SendEmail(subject string, receiver string, content string) error {
-	if SMTPFrom == "" { // for compatibility
-		SMTPFrom = SMTPAccount
+	if config.SMTPFrom == "" { // for compatibility
+		config.SMTPFrom = config.SMTPAccount
 	}
 	encodedSubject := fmt.Sprintf("=?UTF-8?B?%s?=", base64.StdEncoding.EncodeToString([]byte(subject)))
+
+	// Extract domain from SMTPFrom
+	parts := strings.Split(config.SMTPFrom, "@")
+	var domain string
+	if len(parts) > 1 {
+		domain = parts[1]
+	}
+	// Generate a unique Message-ID
+	buf := make([]byte, 16)
+	_, err := rand.Read(buf)
+	if err != nil {
+		return err
+	}
+	messageId := fmt.Sprintf("<%x@%s>", buf, domain)
+
 	mail := []byte(fmt.Sprintf("To: %s\r\n"+
 		"From: %s<%s>\r\n"+
 		"Subject: %s\r\n"+
+		"Message-ID: %s\r\n"+ // add Message-ID header to avoid being treated as spam, RFC 5322
+		"Date: %s\r\n"+
 		"Content-Type: text/html; charset=UTF-8\r\n\r\n%s\r\n",
-		receiver, SystemName, SMTPFrom, encodedSubject, content))
-	auth := smtp.PlainAuth("", SMTPAccount, SMTPToken, SMTPServer)
-	addr := fmt.Sprintf("%s:%d", SMTPServer, SMTPPort)
+		receiver, config.SystemName, config.SMTPFrom, encodedSubject, messageId, time.Now().Format(time.RFC1123Z), content))
+	auth := smtp.PlainAuth("", config.SMTPAccount, config.SMTPToken, config.SMTPServer)
+	addr := fmt.Sprintf("%s:%d", config.SMTPServer, config.SMTPPort)
 	to := strings.Split(receiver, ";")
-	var err error
-	if SMTPPort == 465 {
+
+	if config.SMTPPort == 465 {
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         SMTPServer,
+			ServerName:         config.SMTPServer,
 		}
-		conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", SMTPServer, SMTPPort), tlsConfig)
+		conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", config.SMTPServer, config.SMTPPort), tlsConfig)
 		if err != nil {
 			return err
 		}
-		client, err := smtp.NewClient(conn, SMTPServer)
+		client, err := smtp.NewClient(conn, config.SMTPServer)
 		if err != nil {
 			return err
 		}
@@ -39,7 +59,7 @@ func SendEmail(subject string, receiver string, content string) error {
 		if err = client.Auth(auth); err != nil {
 			return err
 		}
-		if err = client.Mail(SMTPFrom); err != nil {
+		if err = client.Mail(config.SMTPFrom); err != nil {
 			return err
 		}
 		receiverEmails := strings.Split(receiver, ";")
@@ -61,7 +81,7 @@ func SendEmail(subject string, receiver string, content string) error {
 			return err
 		}
 	} else {
-		err = smtp.SendMail(addr, auth, SMTPAccount, to, mail)
+		err = smtp.SendMail(addr, auth, config.SMTPAccount, to, mail)
 	}
 	return err
 }

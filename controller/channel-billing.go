@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/config"
+	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/model"
+	"github.com/songquanpeng/one-api/relay/util"
 	"io"
 	"net/http"
-	"one-api/common"
-	"one-api/model"
 	"strconv"
 	"time"
 
@@ -92,7 +95,7 @@ func GetResponseBody(method, url string, channel *model.Channel, headers http.He
 	for k := range headers {
 		req.Header.Add(k, headers.Get(k))
 	}
-	res, err := httpClient.Do(req)
+	res, err := util.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +114,7 @@ func GetResponseBody(method, url string, channel *model.Channel, headers http.He
 }
 
 func updateChannelCloseAIBalance(channel *model.Channel) (float64, error) {
-	url := fmt.Sprintf("%s/dashboard/billing/credit_grants", channel.BaseURL)
+	url := fmt.Sprintf("%s/dashboard/billing/credit_grants", channel.GetBaseURL())
 	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
 
 	if err != nil {
@@ -201,18 +204,18 @@ func updateChannelAIGC2DBalance(channel *model.Channel) (float64, error) {
 
 func updateChannelBalance(channel *model.Channel) (float64, error) {
 	baseURL := common.ChannelBaseURLs[channel.Type]
-	if channel.BaseURL == "" {
-		channel.BaseURL = baseURL
+	if channel.GetBaseURL() == "" {
+		channel.BaseURL = &baseURL
 	}
 	switch channel.Type {
 	case common.ChannelTypeOpenAI:
-		if channel.BaseURL != "" {
-			baseURL = channel.BaseURL
+		if channel.GetBaseURL() != "" {
+			baseURL = channel.GetBaseURL()
 		}
 	case common.ChannelTypeAzure:
 		return 0, errors.New("尚未实现")
 	case common.ChannelTypeCustom:
-		baseURL = channel.BaseURL
+		baseURL = channel.GetBaseURL()
 	case common.ChannelTypeCloseAI:
 		return updateChannelCloseAIBalance(channel)
 	case common.ChannelTypeOpenAISB:
@@ -313,7 +316,7 @@ func updateAllChannelsBalance() error {
 				disableChannel(channel.Id, channel.Name, "余额不足")
 			}
 		}
-		time.Sleep(common.RequestInterval)
+		time.Sleep(config.RequestInterval)
 	}
 	return nil
 }
@@ -338,8 +341,8 @@ func UpdateAllChannelsBalance(c *gin.Context) {
 func AutomaticallyUpdateChannels(frequency int) {
 	for {
 		time.Sleep(time.Duration(frequency) * time.Minute)
-		common.SysLog("updating all channels")
+		logger.SysLog("updating all channels")
 		_ = updateAllChannelsBalance()
-		common.SysLog("channels update done")
+		logger.SysLog("channels update done")
 	}
 }

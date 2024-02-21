@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/config"
+	"github.com/songquanpeng/one-api/common/logger"
 	"math/rand"
-	"one-api/common"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,21 +16,25 @@ import (
 )
 
 var (
-	TokenCacheSeconds         = common.SyncFrequency
-	UserId2GroupCacheSeconds  = common.SyncFrequency
-	UserId2QuotaCacheSeconds  = common.SyncFrequency
-	UserId2StatusCacheSeconds = common.SyncFrequency
+	TokenCacheSeconds         = config.SyncFrequency
+	UserId2GroupCacheSeconds  = config.SyncFrequency
+	UserId2QuotaCacheSeconds  = config.SyncFrequency
+	UserId2StatusCacheSeconds = config.SyncFrequency
 )
 
 func CacheGetTokenByKey(key string) (*Token, error) {
+	keyCol := "`key`"
+	if common.UsingPostgreSQL {
+		keyCol = `"key"`
+	}
 	var token Token
 	if !common.RedisEnabled {
-		err := DB.Where("`key` = ?", key).First(&token).Error
+		err := DB.Where(keyCol+" = ?", key).First(&token).Error
 		return &token, err
 	}
 	tokenObjectString, err := common.RedisGet(fmt.Sprintf("token:%s", key))
 	if err != nil {
-		err := DB.Where("`key` = ?", key).First(&token).Error
+		err := DB.Where(keyCol+" = ?", key).First(&token).Error
 		if err != nil {
 			return nil, err
 		}
@@ -37,7 +44,7 @@ func CacheGetTokenByKey(key string) (*Token, error) {
 		}
 		err = common.RedisSet(fmt.Sprintf("token:%s", key), string(jsonBytes), time.Duration(TokenCacheSeconds)*time.Second)
 		if err != nil {
-			common.SysError("Redis set token error: " + err.Error())
+			logger.SysError("Redis set token error: " + err.Error())
 		}
 		return &token, nil
 	}
@@ -57,7 +64,7 @@ func CacheGetUserGroup(id int) (group string, err error) {
 		}
 		err = common.RedisSet(fmt.Sprintf("user_group:%d", id), group, time.Duration(UserId2GroupCacheSeconds)*time.Second)
 		if err != nil {
-			common.SysError("Redis set user group error: " + err.Error())
+			logger.SysError("Redis set user group error: " + err.Error())
 		}
 	}
 	return group, err
@@ -75,7 +82,7 @@ func CacheGetUserQuota(id int) (quota int, err error) {
 		}
 		err = common.RedisSet(fmt.Sprintf("user_quota:%d", id), fmt.Sprintf("%d", quota), time.Duration(UserId2QuotaCacheSeconds)*time.Second)
 		if err != nil {
-			common.SysError("Redis set user quota error: " + err.Error())
+			logger.SysError("Redis set user quota error: " + err.Error())
 		}
 		return quota, err
 	}
@@ -103,23 +110,28 @@ func CacheDecreaseUserQuota(id int, quota int) error {
 	return err
 }
 
-func CacheIsUserEnabled(userId int) bool {
+func CacheIsUserEnabled(userId int) (bool, error) {
 	if !common.RedisEnabled {
 		return IsUserEnabled(userId)
 	}
 	enabled, err := common.RedisGet(fmt.Sprintf("user_enabled:%d", userId))
-	if err != nil {
-		status := common.UserStatusDisabled
-		if IsUserEnabled(userId) {
-			status = common.UserStatusEnabled
-		}
-		enabled = fmt.Sprintf("%d", status)
-		err = common.RedisSet(fmt.Sprintf("user_enabled:%d", userId), enabled, time.Duration(UserId2StatusCacheSeconds)*time.Second)
-		if err != nil {
-			common.SysError("Redis set user enabled error: " + err.Error())
-		}
+	if err == nil {
+		return enabled == "1", nil
 	}
-	return enabled == "1"
+
+	userEnabled, err := IsUserEnabled(userId)
+	if err != nil {
+		return false, err
+	}
+	enabled = "0"
+	if userEnabled {
+		enabled = "1"
+	}
+	err = common.RedisSet(fmt.Sprintf("user_enabled:%d", userId), enabled, time.Duration(UserId2StatusCacheSeconds)*time.Second)
+	if err != nil {
+		logger.SysError("Redis set user enabled error: " + err.Error())
+	}
+	return userEnabled, err
 }
 
 var group2model2channels map[string]map[string][]*Channel
@@ -154,22 +166,33 @@ func InitChannelCache() {
 			}
 		}
 	}
+
+	// sort by priority
+	for group, model2channels := range newGroup2model2channels {
+		for model, channels := range model2channels {
+			sort.Slice(channels, func(i, j int) bool {
+				return channels[i].GetPriority() > channels[j].GetPriority()
+			})
+			newGroup2model2channels[group][model] = channels
+		}
+	}
+
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels
 	channelSyncLock.Unlock()
-	common.SysLog("channels synced from database")
+	logger.SysLog("channels synced from database")
 }
 
 func SyncChannelCache(frequency int) {
 	for {
 		time.Sleep(time.Duration(frequency) * time.Second)
-		common.SysLog("syncing channels from database")
+		logger.SysLog("syncing channels from database")
 		InitChannelCache()
 	}
 }
 
 func CacheGetRandomSatisfiedChannel(group string, model string) (*Channel, error) {
-	if !common.RedisEnabled {
+	if !config.MemoryCacheEnabled {
 		return GetRandomSatisfiedChannel(group, model)
 	}
 	channelSyncLock.RLock()
@@ -178,6 +201,17 @@ func CacheGetRandomSatisfiedChannel(group string, model string) (*Channel, error
 	if len(channels) == 0 {
 		return nil, errors.New("channel not found")
 	}
-	idx := rand.Intn(len(channels))
+	endIdx := len(channels)
+	// choose by priority
+	firstChannel := channels[0]
+	if firstChannel.GetPriority() > 0 {
+		for i := range channels {
+			if channels[i].GetPriority() != firstChannel.GetPriority() {
+				endIdx = i
+				break
+			}
+		}
+	}
+	idx := rand.Intn(endIdx)
 	return channels[idx], nil
 }
